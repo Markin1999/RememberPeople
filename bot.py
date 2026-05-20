@@ -420,6 +420,14 @@ async def modifica_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return MOD_CAMPO
 
+async def mod_annulla(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Annulla modifica e torna alla scheda persona."""
+    q = update.callback_query
+    await q.answer()
+    pid = int(q.data.split("_")[1])
+    await show_persona(q, ctx, pid)
+    return ConversationHandler.END
+
 async def mod_campo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -716,11 +724,22 @@ def main():
     mod_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(modifica_start, pattern="^modifica_\\d+$")],
         states={
-            MOD_CAMPO:  [CallbackQueryHandler(mod_campo, pattern="^mod_campo_|^mod_salva$")],
-            MOD_VALORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, mod_valore)],
-            MOD_TIPO:   [CallbackQueryHandler(mod_tipo, pattern="^mod_tipo_")],
+            MOD_CAMPO:  [
+                CallbackQueryHandler(mod_campo, pattern="^mod_campo_nome$|^mod_campo_cognome$|^mod_campo_note$|^mod_campo_tipi$|^mod_salva$"),
+                CallbackQueryHandler(mod_annulla, pattern="^persona_\\d+$"),
+            ],
+            MOD_VALORE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, mod_valore),
+                CallbackQueryHandler(mod_campo, pattern="^mod_campo_nome$|^mod_campo_cognome$|^mod_campo_note$|^mod_campo_tipi$|^mod_salva$"),
+            ],
+            MOD_TIPO:   [
+                CallbackQueryHandler(mod_tipo, pattern="^mod_tipo_"),
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(mod_annulla, pattern="^persona_\\d+$"),
+        ],
     )
     ni_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(nuova_inter_start, pattern="^nuova_inter_")],
