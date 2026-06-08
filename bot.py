@@ -61,8 +61,10 @@ def fmt_persona(p, tipi=None):
         lines.append(f"📅 Ultima: {p['ultima_interazione']}")
     else:
         lines.append("📅 Nessuna interazione ancora")
-    if p.get('note_generali'):
-        lines.append(f"📝 _{p['note_generali']}_")
+    note = (p.get('note_generali') or "").strip()
+    if note:
+        preview = note[:80] + "…" if len(note) > 80 else note
+        lines.append(f"📝 _{_esc(preview)}_")
     return "\n".join(lines)
 
 def main_keyboard():
@@ -76,9 +78,14 @@ def main_keyboard():
 def back_kb(to="menu"):
     return InlineKeyboardMarkup([[InlineKeyboardButton("← Indietro", callback_data=f"back_{to}")]])
 
+def _esc(text):
+    """Escape user content for Telegram legacy Markdown."""
+    return (text or "").replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
+
 # ─── /start ──────────────────────────────────────────────────────────────────
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data.clear()
     await update.message.reply_text(
         "👥 *RememberPeople*\nCosa vuoi fare?",
         parse_mode="Markdown", reply_markup=main_keyboard()
@@ -101,7 +108,16 @@ async def menu_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_persone_per_tipo(q, int(d.split("_")[2]))
     elif d.startswith("persona_") and len(d.split("_")) == 2:
         await show_persona(q, ctx, int(d.split("_")[1]))
-    elif d.startswith("p_inter_"):  await show_interazioni(q, int(d.split("_")[2]))
+    elif d.startswith("note_det_"):
+        await show_note_detail(q, int(d.split("_")[2]))
+    elif d.startswith("inter_det_"):
+        parts_d = d.split("_")
+        await show_inter_detail(q, int(parts_d[2]), int(parts_d[3]))
+    elif d.startswith("p_inter_"):
+        parts_d = d.split("_")
+        pid = int(parts_d[2])
+        pg = int(parts_d[4]) if len(parts_d) > 4 else 0
+        await show_interazioni(q, pid, pg)
     elif d.startswith("p_prom_"):   await show_prom_persona(q, int(d.split("_")[2]))
     elif d.startswith("prom_done_"):
         db.complete_promemoria(int(d.split("_")[2]))
@@ -182,33 +198,111 @@ async def show_persona(q, ctx, persona_id):
     tipi = db.get_tipi_persona(persona_id)
     testo = fmt_persona(p, tipi)
     ctx.user_data['current_persona'] = persona_id
-    await q.edit_message_text(testo, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup([
+    note = (p.get('note_generali') or "").strip()
+    buttons = [
         [InlineKeyboardButton("💬 Interazioni", callback_data=f"p_inter_{persona_id}"),
          InlineKeyboardButton("🔔 Promemoria", callback_data=f"p_prom_{persona_id}")],
         [InlineKeyboardButton("➕ Interazione", callback_data=f"nuova_inter_{persona_id}"),
          InlineKeyboardButton("➕ Promemoria", callback_data=f"nuova_prom_{persona_id}")],
-        [InlineKeyboardButton("✏️ Modifica", callback_data=f"modifica_{persona_id}")],
-        [InlineKeyboardButton("← Lista", callback_data="persone_lista")],
-    ]))
+    ]
+    if note:
+        buttons.append([InlineKeyboardButton("📝 Note complete", callback_data=f"note_det_{persona_id}")])
+    buttons.append([InlineKeyboardButton("✏️ Modifica", callback_data=f"modifica_{persona_id}")])
+    buttons.append([InlineKeyboardButton("← Lista", callback_data="persone_lista")])
+    await q.edit_message_text(testo, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def show_interazioni(q, persona_id):
+
+async def show_note_detail(q, persona_id):
+    p = db.get_persona(persona_id)
+    if not p:
+        await q.edit_message_text("Persona non trovata.")
+        return
+    nome = f"{p['nome']} {p['cognome'] or ''}".strip()
+    note = (p.get('note_generali') or "").strip()
+    testo = f"📝 *Note — {_esc(nome)}*\n\n{_esc(note)}"
+    if len(testo) > 4000:
+        testo = testo[:4000] + "\n\n_…(troncato: troppo lungo per Telegram)_"
+    await q.edit_message_text(testo, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("← Persona", callback_data=f"persona_{persona_id}")],
+        ]))
+
+async def show_interazioni(q, persona_id, page=0):
     interazioni = db.get_interazioni(persona_id)
     p = db.get_persona(persona_id)
     nome = f"{p['nome']} {p['cognome'] or ''}".strip()
+
     if not interazioni:
-        testo = f"*{nome}* — nessuna interazione ancora."
-    else:
-        lines = [f"💬 *{nome}* — {len(interazioni)} interazioni\n"]
-        for i in interazioni[:5]:
-            lines.append(f"📅 *{i['data']}*")
-            if i['cosa_ha_detto']:
-                lines.append(f"› {i['cosa_ha_detto'][:120]}")
-            if i['cosa_so']:
-                lines.append(f"› _{i['cosa_so'][:100]}_")
-            lines.append("")
-        testo = "\n".join(lines)
+        await q.edit_message_text(
+            f"*{nome}* — nessuna interazione ancora.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Persona", callback_data=f"persona_{persona_id}")]]))
+        return
+
+    PAGE_SIZE = 8
+    total = len(interazioni)
+    pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = max(0, min(page, pages - 1))
+    chunk = interazioni[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+    buttons = []
+    for i in chunk:
+        try:
+            data_fmt = datetime.strptime(str(i['data']), "%Y-%m-%d").strftime("%d/%m/%Y")
+        except Exception:
+            data_fmt = str(i['data'])
+        preview = (i.get('cosa_ha_detto') or i.get('cosa_so') or "").strip()
+        label = f"📅 {data_fmt}"
+        if preview:
+            label += f"  — {preview[:30]}…" if len(preview) > 30 else f"  — {preview}"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"inter_det_{i['id']}_{persona_id}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Prec", callback_data=f"p_inter_{persona_id}_pg_{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("Succ ▶", callback_data=f"p_inter_{persona_id}_pg_{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("← Persona", callback_data=f"persona_{persona_id}")])
+
+    header = f"💬 *{_esc(nome)}* — {total} interazion{'e' if total == 1 else 'i'}"
+    if pages > 1:
+        header += f"\nPagina {page + 1} di {pages}"
+    await q.edit_message_text(header, parse_mode="Markdown",
+                               reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def show_inter_detail(q, inter_id, persona_id):
+    interazione = db.get_interazione(inter_id)
+    p = db.get_persona(persona_id)
+    nome = f"{p['nome']} {p['cognome'] or ''}".strip()
+
+    if not interazione:
+        await q.edit_message_text("Interazione non trovata.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Interazioni", callback_data=f"p_inter_{persona_id}")]]))
+        return
+
+    try:
+        data_fmt = datetime.strptime(str(interazione['data']), "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        data_fmt = str(interazione['data'])
+
+    parts = [f"💬 *{_esc(nome)}* — {data_fmt}\n"]
+    if interazione.get('cosa_ha_detto'):
+        parts.append(f"📢 *Cosa ti ha detto:*\n{_esc(interazione['cosa_ha_detto'])}")
+    if interazione.get('cosa_so'):
+        parts.append(f"\n🧠 *Cosa sai:*\n{_esc(interazione['cosa_so'])}")
+
+    testo = "\n".join(parts)
+    if len(testo) > 4000:
+        testo = testo[:4000] + "\n\n_…(troncato: troppo lungo per Telegram)_"
+
     await q.edit_message_text(testo, parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("← Persona", callback_data=f"persona_{persona_id}")]]))
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("← Tutte le interazioni", callback_data=f"p_inter_{persona_id}")],
+            [InlineKeyboardButton("← Persona", callback_data=f"persona_{persona_id}")],
+        ]))
 
 async def show_prom_persona(q, persona_id):
     promemoria = db.get_promemoria_persona(persona_id)
@@ -719,7 +813,9 @@ def main():
             NP_TIPO:    [CallbackQueryHandler(np_tipo, pattern="^sel_tipo_")],
             NP_NOTE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, np_note)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        conversation_timeout=300,
+        allow_reentry=True,
     )
     mod_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(modifica_start, pattern="^modifica_\\d+$")],
@@ -738,8 +834,10 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
+            CommandHandler("start", start),
             CallbackQueryHandler(mod_annulla, pattern="^persona_\\d+$"),
         ],
+        conversation_timeout=300,
     )
     ni_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(nuova_inter_start, pattern="^nuova_inter_")],
@@ -747,7 +845,8 @@ def main():
             NI_DETTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, ni_detto)],
             NI_SO:    [MessageHandler(filters.TEXT & ~filters.COMMAND, ni_so)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        conversation_timeout=300,
     )
     npm_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(nuova_prom_start, pattern="^nuova_prom_")],
@@ -757,7 +856,8 @@ def main():
             NPM_ORA:       [MessageHandler(filters.TEXT & ~filters.COMMAND, npm_ora)],
             NPM_PRIORITA:  [CallbackQueryHandler(npm_priorita_cb, pattern="^npm_prio_")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        conversation_timeout=300,
     )
     ntipo_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(crea_tipo_start, pattern="^crea_tipo$")],
@@ -765,7 +865,8 @@ def main():
             NTIPO_NOME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, ntipo_nome)],
             NTIPO_COLORE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ntipo_colore)],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        conversation_timeout=300,
     )
 
     app.add_handler(CommandHandler("start", start))
