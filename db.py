@@ -255,6 +255,14 @@ def create_interazione(persona_id, data, cosa_ha_detto, cosa_so):
     conn.commit(); cur.close(); conn.close()
     return row
 
+def get_interazione(id):
+    conn = get_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    cur.execute("SELECT * FROM interazioni WHERE id=%s", (id,))
+    row = cur.fetchone()
+    cur.close(); conn.close()
+    return row
+
 def update_interazione(id, data, cosa_ha_detto, cosa_so):
     conn = get_connection()
     cur = conn.cursor()
